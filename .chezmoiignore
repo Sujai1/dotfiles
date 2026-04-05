@@ -1,4 +1,6 @@
 # Chezmoi ignore — don't manage these files/directories
+README.md
+ansible
 .secrets
 .claude/sessions
 .claude/history.jsonl
