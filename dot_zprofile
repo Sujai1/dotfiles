@@ -1,0 +1,6 @@
+
+eval "$(/opt/homebrew/bin/brew shellenv)"
+
+# System Python paths disabled — using conda for environment management
+# PATH="/Library/Frameworks/Python.framework/Versions/3.12/bin:${PATH}"
+# PATH="/Library/Frameworks/Python.framework/Versions/3.11/bin:${PATH}"

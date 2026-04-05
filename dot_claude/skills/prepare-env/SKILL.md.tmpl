@@ -1,0 +1,140 @@
+---
+name: prepare-env
+description: Prepare a reusable EC2 environment (AMI) for experiments. Reads experiment.yaml env section, launches EC2, installs all dependencies and W&B, saves as custom AMI. Run once per project or when deps change.
+allowed-tools: Bash, Read, Write, Edit
+argument-hint: [experiment-yaml-path]
+---
+
+# Prepare Environment Skill
+
+You are helping the user create a reusable EC2 AMI with all project dependencies pre-installed.
+This AMI is then used by `/run-experiment` and `/run-sweep` to avoid reinstalling deps every time.
+
+## Configuration
+- **PEM file**: `{{ .chezmoi.homeDir }}/Desktop/Sujai.pem`
+- **Region**: `us-east-2`
+- **EC2 user**: `ubuntu` (DLAMI Ubuntu 22.04 — never use `ec2-user`)
+- **Scripts**: `~/Desktop/shreshth_play/ec2/`
+
+## Arguments
+- `$ARGUMENTS[0]` — path to experiment.yaml (default: `./experiment.yaml` in current directory)
+
+## Step 1 — Read experiment.yaml
+
+Read the `env` section. Extract:
+- `base_ami` — starting AMI (`"latest-dlami"` or a specific AMI ID)
+- `snapshot_ami` — existing prepared AMI (may be null)
+- `requirements` — path to requirements file
+- `setup_script` — optional setup script
+- `extra_pip` — additional pip packages
+
+If `snapshot_ami` is already set, ask the user:
+> "An existing environment AMI exists (`<snapshot_ami>`). Do you want to rebuild from scratch, or skip?"
+
+If they say skip, stop here.
+
+## Step 2 — Launch a temporary instance
+
+Use the existing launch script. If `base_ami` is a specific AMI ID, pass it via `CUSTOM_AMI`:
+
+```bash
+cd ~/Desktop/shreshth_play
+
+# If base_ami is "latest-dlami", don't set CUSTOM_AMI
+# If base_ami is an AMI ID (ami-xxx), set CUSTOM_AMI
+CUSTOM_AMI=<ami_id_or_unset> bash ec2/launch.sh g4dn.xlarge env-prep-$(date +%Y%m%d-%H%M%S)
+```
+
+Extract `INSTANCE_ID`, `PUBLIC_IP` from the output. Wait for SSH to be ready.
+
+## Step 3 — Sync project code
+
+```bash
+rsync -avz --exclude '__pycache__' --exclude '.git' --exclude 'results/' --exclude 'wandb/' \
+  <project_dir>/ ubuntu@<PUBLIC_IP>:~/shreshth_play/
+```
+
+## Step 4 — Install dependencies
+
+SSH into the instance and install everything:
+
+```bash
+PEM="{{ .chezmoi.homeDir }}/Desktop/Sujai.pem"
+IP=<PUBLIC_IP>
+
+# Extract W&B API key from local machine
+WANDB_KEY=$(grep -A2 'api.wandb.ai' ~/.netrc | grep password | awk '{print $2}')
+
+# Install pip requirements
+ssh -i $PEM ubuntu@$IP "cd ~/shreshth_play && pip install -r <requirements>"
+
+# Install wandb + any extra pip packages
+ssh -i $PEM ubuntu@$IP "pip install wandb <extra_pip_packages_space_separated>"
+
+# Login to W&B on the instance
+ssh -i $PEM ubuntu@$IP "wandb login $WANDB_KEY"
+
+# Run setup script if provided (not null)
+ssh -i $PEM ubuntu@$IP "cd ~/shreshth_play && bash <setup_script>"
+```
+
+Report what was installed and any errors.
+
+## Step 5 — Create AMI
+
+Stop the instance first (required for a consistent snapshot), then create the AMI:
+
+```bash
+# Stop instance
+aws ec2 stop-instances --instance-ids <INSTANCE_ID> --region us-east-2
+aws ec2 wait instance-stopped --instance-ids <INSTANCE_ID> --region us-east-2
+
+# Create AMI
+AMI_NAME="<project_name>-env-$(date +%Y%m%d-%H%M%S)"
+NEW_AMI=$(aws ec2 create-image \
+    --instance-id <INSTANCE_ID> \
+    --name "$AMI_NAME" \
+    --description "Experiment env with deps pre-installed" \
+    --region us-east-2 \
+    --query ImageId --output text)
+
+echo "Creating AMI: $NEW_AMI ($AMI_NAME)"
+```
+
+Tell the user: **"AMI is being created. This typically takes 5-10 minutes."**
+
+```bash
+aws ec2 wait image-available --image-ids $NEW_AMI --region us-east-2
+echo "AMI ready: $NEW_AMI"
+```
+
+## Step 6 — Update experiment.yaml
+
+Write the new AMI ID into experiment.yaml under `env.snapshot_ami`. Use the Edit tool to replace the `snapshot_ami: null` (or old value) with the new AMI ID.
+
+## Step 7 — Terminate the temporary instance
+
+```bash
+aws ec2 terminate-instances --instance-ids <INSTANCE_ID> --region us-east-2
+```
+
+## Step 8 — Summary
+
+```
+══════════════════════════════════════════════
+  Environment Prepared!
+  AMI:        <NEW_AMI> (<AMI_NAME>)
+  Base:       <base_ami>
+  Deps:       <requirements> + wandb + <extra_pip>
+  Setup:      <setup_script or "none">
+  
+  experiment.yaml updated with snapshot_ami
+  Use /run-experiment or /run-sweep to launch experiments.
+══════════════════════════════════════════════
+```
+
+## Notes
+- The `ubuntu` username is correct for DLAMI Ubuntu 22.04 — do not use `ec2-user`
+- If the user wants to update an existing AMI (not rebuild from scratch), use the existing `snapshot_ami` as the `base_ami` for the temporary instance
+- Always install `wandb` even if it's not in extra_pip
+- The W&B API key is read from `~/.netrc` on the local machine and passed to the instance

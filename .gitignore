@@ -1,0 +1,9 @@
+# Never commit secrets
+.secrets
+**/secrets*
+*.pem
+*.key
+
+# Auto-generated files
+environment.yml
+requirements.lock.txt

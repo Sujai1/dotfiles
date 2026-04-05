@@ -1,0 +1,236 @@
+---
+name: run-sweep
+description: Run a hyperparameter sweep across multiple EC2 instances. Generates trial grid from experiment.yaml, distributes across instances (parallel or sequential), logs all runs to W&B, and provides a ranked summary with analysis.
+allowed-tools: Bash, Read, Write, Edit
+argument-hint: [sweep-name] [experiment-yaml-path]
+---
+
+# Run Sweep Skill
+
+You are helping the user run a hyperparameter sweep across multiple EC2 instances.
+This skill reads the sweep config from `experiment.yaml`, generates all trial combinations,
+distributes them across instances, and provides a summary when complete.
+
+## Configuration
+- **PEM file**: `{{ .chezmoi.homeDir }}/Desktop/Sujai.pem`
+- **Region**: `us-east-2`
+- **EC2 user**: `ubuntu` (DLAMI Ubuntu 22.04 — never use `ec2-user`)
+- **Scripts**: `~/Desktop/shreshth_play/ec2/`
+
+## Arguments
+- `$ARGUMENTS[0]` — sweep name (e.g. `lr-sweep-v1`). If not provided, ask the user.
+- `$ARGUMENTS[1]` — path to experiment.yaml (default: `./experiment.yaml`)
+
+## Step 0 — Auto-commit code
+
+Before anything else, commit the current code state so the experiment is reproducible:
+
+```bash
+cd ~/Desktop/shreshth_play
+bash ec2/pre-experiment-commit.sh <sweep_name>
+```
+
+This stages all changes, commits with the sweep name, and pushes to GitHub. The commit SHA is included in the output — pass it as `COMMIT_SHA` env var to trial scripts so each W&B run records which code version it used.
+
+## Step 1 — Read experiment.yaml and generate trial grid
+
+Read the full experiment.yaml. Extract:
+- `env.snapshot_ami` — must exist (if null, tell user to run `/prepare-env` first)
+- `experiment.train_command`
+- `experiment.wandb_entity`
+- `experiment.wandb_project`
+- `experiment.results_dir`
+- `experiment.sync_exclude`
+- `sweep.hyperparams` — dict of param_name to list of values
+- `sweep.hyperparam_mode` — how to pass params (`argparse` or `env`)
+- `sweep.max_parallel_instances`
+- `sweep.instance_type` — override (or fall back to `experiment.instance_type`)
+
+Generate the full Cartesian product of all hyperparameter combinations:
+```
+Example:
+  hyperparams:
+    lr: [1e-3, 1e-4]
+    batch_size: [32, 64]
+
+  Trials:
+    trial-1: lr=1e-3, batch_size=32
+    trial-2: lr=1e-3, batch_size=64
+    trial-3: lr=1e-4, batch_size=32
+    trial-4: lr=1e-4, batch_size=64
+```
+
+Display the grid and ask for confirmation:
+> "This sweep will run **N trials** across up to **M instances**.
+> Instance type: `<instance_type>` (~$X/hr spot).
+> Proceed?"
+
+## Step 2 — Plan scheduling
+
+Decide how to distribute trials:
+
+- **Wide mode** (total_trials <= max_parallel_instances):
+  1 instance per trial, all run in parallel.
+
+- **Deep mode** (total_trials > max_parallel_instances):
+  Distribute trials round-robin across max_parallel_instances.
+  Each instance runs its assigned trials sequentially.
+
+Display the schedule:
+```
+Schedule: Deep mode (6 trials across 3 instances)
+  Instance 1: trial-1, trial-4
+  Instance 2: trial-2, trial-5
+  Instance 3: trial-3, trial-6
+```
+
+## Step 3 — Launch instances
+
+Launch all needed instances from the prepared AMI:
+
+```bash
+cd ~/Desktop/shreshth_play
+
+# Launch instances (can be done in parallel)
+for i in $(seq 1 <num_instances>); do
+  CUSTOM_AMI=<snapshot_ami> bash ec2/launch.sh <instance_type> <sweep_name>-node-$i
+done
+```
+
+Collect all INSTANCE_IDs, PUBLIC_IPs, and SSH_ALIASes.
+Report as each instance comes online.
+
+## Step 4 — Sync code to all instances
+
+```bash
+for IP in <all_public_ips>; do
+  rsync -avz --exclude '__pycache__' --exclude '.git' --exclude 'results/' --exclude 'wandb/' --exclude '*.pyc' \
+    <project_dir>/ ubuntu@$IP:~/shreshth_play/ &
+done
+wait
+```
+
+## Step 5 — Build and launch trial scripts
+
+For each instance, create a script that runs its assigned trials sequentially.
+All trials in this sweep share the same `wandb.group` for easy comparison.
+
+```bash
+PEM="{{ .chezmoi.homeDir }}/Desktop/Sujai.pem"
+
+# For each instance, build a runner script
+for each (instance_ip, assigned_trials):
+  # Build the runner script content
+  RUNNER="#!/bin/bash\nset -euo pipefail\ncd ~/shreshth_play\n"
+  
+  for each trial in assigned_trials:
+    if hyperparam_mode == "argparse":
+      TRIAL_CMD="WANDB_PROJECT=<wandb_project> WANDB_ENTITY=<wandb_entity> WANDB_RUN_NAME=<trial_name> WANDB_RUN_GROUP=<sweep_name> <train_command> --<param1> <val1> --<param2> <val2>"
+    elif hyperparam_mode == "env":
+      TRIAL_CMD="WANDB_PROJECT=<wandb_project> WANDB_ENTITY=<wandb_entity> WANDB_RUN_NAME=<trial_name> WANDB_RUN_GROUP=<sweep_name> <PARAM1>=<val1> <PARAM2>=<val2> <train_command>"
+    
+    RUNNER+="echo '=== Running <trial_name> ==='\n$TRIAL_CMD\n"
+  
+  # Upload and run the script
+  echo -e "$RUNNER" | ssh -i $PEM ubuntu@$IP "cat > ~/sweep_runner.sh && chmod +x ~/sweep_runner.sh"
+  ssh -i $PEM ubuntu@$IP "nohup bash ~/sweep_runner.sh > ~/sweep.log 2>&1 &"
+done
+```
+
+Tell the user:
+> "All trials launched. Monitor live at: https://wandb.ai/<wandb_entity>/<wandb_project>
+> Group filter: `<sweep_name>`"
+
+## Step 6 — Monitor progress
+
+Poll W&B API periodically to check completion:
+
+```python
+import wandb, time
+api = wandb.Api()
+total = <total_trials>
+
+while True:
+    runs = api.runs("<wandb_entity>/<wandb_project>", filters={"group": "<sweep_name>"})
+    finished = [r for r in runs if r.state == "finished"]
+    failed = [r for r in runs if r.state in ("failed", "crashed")]
+    print(f"Progress: {len(finished)}/{total} complete, {len(failed)} failed")
+    if len(finished) + len(failed) >= total:
+        break
+    time.sleep(120)
+```
+
+Report progress updates to the user. If any trials fail, report which ones and why.
+
+Also monitor by tailing logs on the instances:
+```bash
+ssh -i $PEM ubuntu@<IP> "tail -5 ~/sweep.log"
+```
+
+## Step 7 — Collect results and summarize
+
+When all trials complete, fetch results from W&B:
+
+```python
+import wandb
+api = wandb.Api()
+runs = api.runs("<wandb_entity>/<wandb_project>", filters={"group": "<sweep_name>"})
+
+print(f"\n{'='*60}")
+print(f"  Sweep Complete: <sweep_name>")
+print(f"  Trials: {len(runs)}")
+print(f"{'='*60}\n")
+
+# Sort by best metric (adapt key to what the training script logs)
+sorted_runs = sorted(runs, key=lambda r: r.summary.get("best_metric", r.summary.get("acc", 0)), reverse=True)
+
+for i, run in enumerate(sorted_runs, 1):
+    config_str = ", ".join(f"{k}={v}" for k, v in run.config.items() if not k.startswith("_"))
+    metric_str = ", ".join(f"{k}={v:.4f}" for k, v in run.summary.items() if not k.startswith("_") and isinstance(v, (int, float)))
+    print(f"  #{i} {run.name}: {config_str} -> {metric_str}")
+
+print(f"\n  Best: {sorted_runs[0].name}")
+print(f"  W&B: https://wandb.ai/<wandb_entity>/<wandb_project>?group={sweep_name}")
+```
+
+Provide analysis:
+- Which hyperparameters had the biggest impact on performance?
+- Are there clear trends (e.g., lower lr consistently better)?
+- Any surprising results or failures?
+- Suggested next steps (narrow search range, try intermediate values, scale up best config)
+
+## Step 8 — Terminate all instances
+
+```bash
+cd ~/Desktop/shreshth_play
+for INSTANCE_ID in <all_instance_ids>; do
+  bash ec2/stop.sh $INSTANCE_ID ~/shreshth_play/<results_dir>
+done
+```
+
+Confirm all instances are terminated. Report final cost estimate if possible.
+
+## Final Summary
+
+```
+══════════════════════════════════════════════
+  Sweep: <sweep_name>
+  Trials: <completed>/<total> complete
+  Instances: <num_instances> (<instance_type>)
+  
+  Best: <best_trial_name>
+    Config: <best_config>
+    Metrics: <best_metrics>
+  
+  W&B: https://wandb.ai/<wandb_entity>/<wandb_project>
+  All instances terminated.
+══════════════════════════════════════════════
+```
+
+## Notes
+- The `ubuntu` username is correct for DLAMI Ubuntu 22.04 — do not use `ec2-user`
+- All trials use `WANDB_RUN_GROUP=<sweep_name>` so they are grouped in the W&B dashboard
+- If a trial fails, the runner script continues to the next trial (set -e is per-trial, not per-script)
+- Spot instances may be interrupted — if an instance dies mid-sweep, report which trials were lost and offer to re-run them
+- For `env` hyperparam_mode, convert param names to UPPER_CASE (e.g. `learning_rate` → `LEARNING_RATE`)
+- Cost estimate: check spot price with `aws ec2 describe-spot-price-history --instance-types <type> --product-descriptions "Linux/UNIX" --region us-east-2 --query 'SpotPriceHistory[0].SpotPrice'`

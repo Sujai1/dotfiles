@@ -1,0 +1,128 @@
+#!/bin/bash
+# claude-fork — Fork the Claude Code session running in the given tmux pane.
+# Called by tmux binding: bind v run-shell "~/.local/bin/claude-fork '#{pane_id}'"
+#
+# Challenge: Claude Code creates new session IDs when context is compressed,
+# but never updates ~/.claude/sessions/<PID>.json. So the session file often
+# points to a stale conversation.
+#
+# Strategy:
+# 1. Find the Claude process in the target pane
+# 2. Get its CWD and original session ID from the session file
+# 3. Use a Python script to find the CURRENT session by:
+#    a. Looking at all conversation files in the project directory
+#    b. Eliminating sessions claimed by OTHER PIDs
+#    c. Among unclaimed sessions, finding the most recently modified one
+#       that was created after the original session
+# 4. Fork that session
+
+PANE_ID="$1"
+if [ -z "$PANE_ID" ]; then
+    echo "Usage: claude-fork <pane_id>" >&2
+    exit 1
+fi
+
+PANE_PID=$(tmux display-message -t "$PANE_ID" -p '#{pane_pid}')
+PANE_PATH=$(tmux display-message -t "$PANE_ID" -p '#{pane_current_path}')
+
+# Find the Claude process: either the pane PID itself or a child
+CLAUDE_PID="$PANE_PID"
+SESSION_FILE="$HOME/.claude/sessions/${PANE_PID}.json"
+
+if [ ! -f "$SESSION_FILE" ]; then
+    CLAUDE_PID=$(pgrep -P "$PANE_PID" -f 'claude' 2>/dev/null | head -1)
+    if [ -z "$CLAUDE_PID" ]; then
+        tmux display-message "No Claude Code process found in this pane"
+        exit 1
+    fi
+    SESSION_FILE="$HOME/.claude/sessions/${CLAUDE_PID}.json"
+fi
+
+if [ ! -f "$SESSION_FILE" ]; then
+    tmux display-message "No session file found for PID $CLAUDE_PID"
+    exit 1
+fi
+
+# Use Python to resolve the current session ID
+# Must run from /tmp to avoid simple-evals/types.py shadowing stdlib
+SESSION_ID=$(cd /tmp && python3 -c "
+import json, os, glob
+
+session = json.load(open('$SESSION_FILE'))
+original_sid = session['sessionId']
+cwd = session.get('cwd', '$PANE_PATH')
+target_pid = $CLAUDE_PID
+
+# Map CWD to Claude project directory
+encoded = cwd.replace('/', '-')
+project_dir = os.path.expanduser(f'~/.claude/projects/{encoded}')
+
+if not os.path.isdir(project_dir):
+    # Fallback: try finding a matching project dir
+    for c in glob.glob(os.path.expanduser('~/.claude/projects/*')):
+        if encoded in os.path.basename(c):
+            project_dir = c
+            break
+
+if not os.path.isdir(project_dir):
+    # Can't find project dir, use original session ID
+    print(original_sid)
+    exit(0)
+
+# Collect all session IDs claimed by OTHER PIDs
+sessions_dir = os.path.expanduser('~/.claude/sessions')
+other_claimed = set()
+for sf in glob.glob(f'{sessions_dir}/*.json'):
+    try:
+        s = json.load(open(sf))
+        if s['pid'] != target_pid:
+            other_claimed.add(s['sessionId'])
+    except:
+        pass
+
+# Get the creation time of the original session file
+original_jsonl = f'{project_dir}/{original_sid}.jsonl'
+if os.path.exists(original_jsonl):
+    original_created = os.stat(original_jsonl).st_birthtime
+else:
+    print(original_sid)
+    exit(0)
+
+# Find all jsonl files that:
+# 1. Were created AFTER the original session
+# 2. Are NOT claimed by other PIDs
+# 3. Pick the most recently MODIFIED one (that's the current active session)
+candidates = []
+for f in glob.glob(f'{project_dir}/*.jsonl'):
+    sid = os.path.basename(f).replace('.jsonl', '')
+    if sid in other_claimed:
+        continue
+    ctime = os.stat(f).st_birthtime
+    mtime = os.path.getmtime(f)
+    size = os.path.getsize(f)
+    if ctime >= original_created:
+        candidates.append((sid, mtime, size))
+
+if not candidates:
+    print(original_sid)
+    exit(0)
+
+# Sort by modification time (most recent first), then by size as tiebreaker
+candidates.sort(key=lambda x: (-x[1], -x[2]))
+best_sid = candidates[0][0]
+print(best_sid)
+" 2>/dev/null)
+
+if [ -z "$SESSION_ID" ]; then
+    # Final fallback: use session file directly
+    SESSION_ID=$(grep -o '"sessionId":"[^"]*"' "$SESSION_FILE" | cut -d'"' -f4)
+fi
+
+if [ -z "$SESSION_ID" ]; then
+    tmux display-message "Could not determine session to fork"
+    exit 1
+fi
+
+# Open a new pane and fork the identified session
+tmux split-window -h -t "$PANE_ID" -c "$PANE_PATH" \
+    "claude --resume '$SESSION_ID' --fork-session --dangerously-skip-permissions"

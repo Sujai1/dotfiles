@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Log every user prompt to ~/Desktop/claude_daily_log.md, grouped by date."""
+
+import sys
+# Remove dirs that shadow stdlib modules (e.g. simple-evals/types.py)
+import os
+_cwd = os.getcwd()
+sys.path = [p for p in sys.path if p not in ("", ".") and os.path.abspath(p) != os.path.abspath(_cwd)]
+import json
+from datetime import datetime
+from pathlib import Path
+
+LOG_FILE = Path("{{ .chezmoi.homeDir }}/Desktop/claude_daily_log.md")
+
+
+def main():
+    try:
+        data = json.load(sys.stdin)
+    except (json.JSONDecodeError, EOFError):
+        return
+
+    prompt = data.get("prompt", "").strip()
+    if not prompt:
+        return
+
+    cwd = data.get("cwd", "unknown")
+    cwd = cwd.replace("{{ .chezmoi.homeDir }}", "~")
+
+    now = datetime.now()
+    date_header = f"# {now.strftime('%Y-%m-%d')}"
+    time_str = now.strftime("%H:%M:%S")
+
+    entry = f"## {time_str} | {cwd}\n{prompt}\n\n"
+
+    need_date_header = True
+    if LOG_FILE.exists():
+        content = LOG_FILE.read_text()
+        if date_header in content:
+            need_date_header = False
+
+    with LOG_FILE.open("a") as f:
+        if need_date_header:
+            if LOG_FILE.exists() and LOG_FILE.stat().st_size > 0:
+                f.write("\n")
+            f.write(f"{date_header}\n\n")
+        f.write(entry)
+
+
+if __name__ == "__main__":
+    main()

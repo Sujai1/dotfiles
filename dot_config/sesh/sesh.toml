@@ -1,0 +1,5 @@
+[default_session]
+startup_command = ""
+
+[zoxide]
+enabled = false

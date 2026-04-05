@@ -1,0 +1,60 @@
+#!/bin/bash
+# Triggered by tmux binding (prefix + g).
+#
+# Layout while editing:
+#   ┌──────────────┬──────────────┐
+#   │              │   nvim       │
+#   │  Context     │   (prompt)   │
+#   │  (less)      ├──────────────┤
+#   │              │ Claude (tiny)│
+#   └──────────────┴──────────────┘
+#
+# Workflow:
+#   1. Ctrl+A g  → context + nvim open side by side
+#   2. Write prompt in nvim, reference context on left
+#   3. :wq       → prompt pasted into Claude Code, context pane auto-closes
+
+CLAUDE_PANE="$1"
+CONTEXT="/tmp/claude-context-$$"
+PROMPT_FILE="/tmp/claude-prompt-$$.md"
+touch "$PROMPT_FILE"
+
+# Calculate context pane width (50% of window, with small margin)
+WIN_WIDTH=$(tmux display-message -t "$CLAUDE_PANE" -p '#{window_width}')
+CTX_WIDTH=$(( WIN_WIDTH / 2 - 2 ))
+
+# Capture full scrollback, strip ANSI codes, keep last 100 lines, word-wrap to fit pane
+tmux capture-pane -t "$CLAUDE_PANE" -p -S - -E - | \
+  perl -pe 's/\e\[[0-9;?]*[a-zA-Z]//g; s/\e\([A-Z]//g; s/\e\][^\a]*\a//g; s/[\x00-\x08\x0e-\x1f]//g' | \
+  sed '/^$/{ N; /^\n$/d; }' | \
+  tail -n 100 | \
+  fold -s -w "$CTX_WIDTH" > "$CONTEXT"
+
+# Left side: scrollable context viewer (50% width), starting at bottom
+CONTEXT_PANE=$(tmux split-window -t "$CLAUDE_PANE" -h -b -l 50% \
+  -P -F '#{pane_id}' \
+  "less +G '$CONTEXT'; rm -f '$CONTEXT'")
+
+# Right side: nvim above the Claude pane (takes 95% of the right column)
+NVIM_PANE=$(tmux split-window -t "$CLAUDE_PANE" -v -b -l 95% \
+  -P -F '#{pane_id}' \
+  "nvim '$PROMPT_FILE'")
+
+# Focus on nvim so user can start typing immediately
+tmux select-pane -t "$NVIM_PANE"
+
+# Wait for nvim to exit (pane auto-closes when nvim quits)
+while tmux list-panes -F '#{pane_id}' 2>/dev/null | grep -q "^${NVIM_PANE}$"; do
+  sleep 0.5
+done
+
+# Paste prompt into Claude Code if the file has content
+if [ -s "$PROMPT_FILE" ]; then
+  tmux load-buffer "$PROMPT_FILE"
+  tmux paste-buffer -t "$CLAUDE_PANE" -p
+fi
+
+# Clean up: kill context pane, re-select Claude Code
+tmux kill-pane -t "$CONTEXT_PANE" 2>/dev/null
+tmux select-pane -t "$CLAUDE_PANE" 2>/dev/null
+rm -f "$PROMPT_FILE" "$CONTEXT" 2>/dev/null

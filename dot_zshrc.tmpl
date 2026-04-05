@@ -1,0 +1,84 @@
+# Deduplicate PATH helper — only prepend if not already present
+_prepend_path() { [[ ":$PATH:" != *":$1:"* ]] && PATH="$1:$PATH"; }
+
+_prepend_path "/usr/local/bin"
+
+# Auto-launch tmux on terminal open
+if command -v tmux &> /dev/null && [ -z "$TMUX" ] && [[ $- == *i* ]]; then
+  exec tmux new-session
+fi
+
+# >>> conda initialize >>>
+# !! Contents within this block are managed by 'conda init' !!
+__conda_setup="$('{{ .chezmoi.homeDir }}/miniconda3/bin/conda' 'shell.zsh' 'hook' 2> /dev/null)"
+if [ $? -eq 0 ]; then
+    eval "$__conda_setup"
+else
+    if [ -f "{{ .chezmoi.homeDir }}/miniconda3/etc/profile.d/conda.sh" ]; then
+        . "{{ .chezmoi.homeDir }}/miniconda3/etc/profile.d/conda.sh"
+    else
+        export PATH="{{ .chezmoi.homeDir }}/miniconda3/bin:$PATH"
+    fi
+fi
+unset __conda_setup
+# <<< conda initialize <<<
+
+_prepend_path "$HOME/.local/bin"
+
+# Default editor: neovim (LazyVim)
+export EDITOR="nvim"
+export VISUAL="nvim"
+alias vim="nvim"
+alias vi="nvim"
+
+# Claude Code permissive mode
+alias rl="source ~/.zshrc"
+alias ccd="claude --dangerously-skip-permissions"
+alias ccdc="claude --dangerously-skip-permissions --continue"
+
+# Fork current Claude conversation into a new kitty tab
+alias claude-fork='kitty @ --to unix:/tmp/kitty-$KITTY_PID launch --type=tab -- claude --continue --fork-session'
+alias ccd-fork='kitty @ --to unix:/tmp/kitty-$KITTY_PID launch --type=tab -- claude --continue --fork-session --dangerously-skip-permissions'
+
+# Zoxide - smart directory jumper
+eval "$(zoxide init zsh)"
+
+# Sesh - tmux session manager
+function t() {
+  session=$(sesh list | fzf --height 40% --reverse)
+  if [ -n "$session" ]; then
+    sesh connect "$session"
+  fi
+}
+
+# Ctrl+A as tmux prefix (easier than Ctrl+B)
+# Configure in ~/.tmux.conf
+
+# Auto-activate conda env: runs before every prompt, catches cd / tmux switch / reattach
+_auto_conda_env() {
+  local dir="$PWD"
+  while [[ "$dir" != "/" && -n "$dir" ]]; do
+    if [[ -f "$dir/.conda-env" ]]; then
+      local env_name=$(<"$dir/.conda-env")
+      env_name="${env_name## }"; env_name="${env_name%% }"  # trim whitespace
+      if [[ -n "$env_name" && "$CONDA_DEFAULT_ENV" != "$env_name" ]]; then
+        # cd to /tmp before activating to avoid cwd shadowing stdlib modules
+        # (e.g. a project's types.py breaking conda's Python internals)
+        local _saved_pwd="$PWD"
+        cd /tmp && conda activate "$env_name" 2>/dev/null
+        cd "$_saved_pwd"
+      fi
+      return
+    fi
+    dir="${dir:h}"
+  done
+}
+precmd_functions+=(_auto_conda_env)
+
+# Auto-launch Claude Code on terminal open
+if [[ -z "$CLAUDE_CODE_RUNNING" && $- == *i* ]]; then
+  export CLAUDE_CODE_RUNNING=1
+  claude --dangerously-skip-permissions
+fi
+# API keys (kept in ~/.secrets, never version-controlled)
+[ -f ~/.secrets ] && source ~/.secrets

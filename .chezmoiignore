@@ -1,0 +1,22 @@
+# Chezmoi ignore — don't manage these files/directories
+.secrets
+.claude/sessions
+.claude/history.jsonl
+.claude/cache
+.claude/file-history
+.claude/paste-cache
+.claude/session-env
+.claude/shell-snapshots
+.claude/tasks
+.claude/todos
+.claude/stats-cache.json
+.claude/statsig
+.claude/telemetry
+.claude/debug
+.claude/ide
+.claude/backups
+.claude/plans
+.claude/plugins
+.claude/teams
+.claude/projects
+.claude/mcp-needs-auth-cache.json

@@ -1,0 +1,160 @@
+---
+name: run-experiment
+description: Run a single experiment on EC2. Launches from prepared AMI, syncs code, runs training, logs to W&B, shows inline results. Use for quick single-run testing before a full sweep.
+allowed-tools: Bash, Read, Write, Edit
+argument-hint: [experiment-name] [extra-args...]
+---
+
+# Run Single Experiment Skill
+
+You are helping the user run a single training experiment on an EC2 GPU instance.
+This skill reads `experiment.yaml`, launches from a prepared AMI, runs the training command, and shows results.
+
+## Configuration
+- **PEM file**: `{{ .chezmoi.homeDir }}/Desktop/Sujai.pem`
+- **Region**: `us-east-2`
+- **EC2 user**: `ubuntu` (DLAMI Ubuntu 22.04 — never use `ec2-user`)
+- **Scripts**: `~/Desktop/shreshth_play/ec2/`
+
+## Arguments
+- `$ARGUMENTS[0]` — experiment name (e.g. `lr-test-1e3`). If not provided, ask the user.
+- `$ARGUMENTS[1+]` — extra args appended to train_command (e.g. `--lr 1e-3 --epochs 50`)
+
+## Step 0 — Auto-commit code
+
+Before anything else, commit the current code state so the experiment is reproducible:
+
+```bash
+cd ~/Desktop/shreshth_play
+bash ec2/pre-experiment-commit.sh <experiment_name>
+```
+
+This stages all changes, commits with the experiment name, and pushes to GitHub.
+
+## Step 1 — Read experiment.yaml
+
+Read `experiment.yaml` from the current project directory. Extract:
+- `env.snapshot_ami` — prepared AMI to launch from
+- `experiment.train_command` — the training command
+- `experiment.instance_type` — EC2 instance type
+- `experiment.wandb_entity` — W&B entity
+- `experiment.wandb_project` — W&B project name
+- `experiment.results_dir` — where results are saved on EC2
+- `experiment.sync_exclude` — files to exclude from rsync
+
+If `env.snapshot_ami` is null, tell the user:
+> "No prepared environment AMI found. Run `/prepare-env` first, or set `env.base_ami` to an existing AMI and run `/prepare-env`."
+
+## Step 2 — Launch instance from prepared AMI
+
+```bash
+cd ~/Desktop/shreshth_play
+CUSTOM_AMI=<snapshot_ami> bash ec2/launch.sh <instance_type> <experiment_name>
+```
+
+Extract `INSTANCE_ID`, `PUBLIC_IP`, and `SSH_ALIAS` from the output.
+The script waits for SSH — tell the user this takes 2-4 minutes.
+
+## Step 3 — Sync code
+
+Build rsync exclude flags from `experiment.sync_exclude`:
+
+```bash
+rsync -avz \
+  --exclude '__pycache__' --exclude '.git' --exclude 'results/' --exclude 'wandb/' --exclude '*.pyc' \
+  <project_dir>/ ubuntu@<PUBLIC_IP>:~/shreshth_play/
+```
+
+Report files transferred.
+
+## Step 4 — Run the experiment
+
+Build the full command: `train_command` + any extra arguments from `$ARGUMENTS[1+]`.
+
+```bash
+PEM="{{ .chezmoi.homeDir }}/Desktop/Sujai.pem"
+ssh -i $PEM ubuntu@<PUBLIC_IP> \
+  "cd ~/shreshth_play && \
+   WANDB_PROJECT=<wandb_project> \
+   WANDB_ENTITY=<wandb_entity> \
+   WANDB_RUN_NAME=<experiment_name> \
+   nohup <train_command> <extra_args> > train.log 2>&1 &"
+```
+
+Then tail the log to show progress:
+```bash
+ssh -i $PEM ubuntu@<PUBLIC_IP> "tail -f ~/shreshth_play/train.log"
+```
+
+Tell the user:
+> "Training is running. You can also monitor live at: https://wandb.ai/<wandb_entity>/<wandb_project>"
+
+If the training is expected to be long-running, ask whether they want to:
+1. Wait and watch the output
+2. Let it run in background and check back later
+
+## Step 5 — Pull results and show summary
+
+When training completes:
+
+```bash
+# Pull results from EC2
+mkdir -p <project_dir>/results/<experiment_name>/
+rsync -avz ubuntu@<PUBLIC_IP>:~/shreshth_play/<results_dir>/ \
+  <project_dir>/results/<experiment_name>/
+```
+
+Display any plots inline (requires iTerm2):
+```bash
+for f in <project_dir>/results/<experiment_name>/*.png; do
+  imgcat "$f" 2>/dev/null || echo "Plot saved: $f"
+done
+```
+
+Fetch W&B run summary:
+```bash
+python3 -c "
+import wandb
+api = wandb.Api()
+runs = api.runs('<wandb_entity>/<wandb_project>', filters={'display_name': '<experiment_name>'})
+if runs:
+    r = runs[0]
+    print('Run:', r.name)
+    print('URL:', r.url)
+    for k, v in r.summary.items():
+        if not k.startswith('_'):
+            print(f'  {k}: {v}')
+else:
+    print('No matching W&B run found')
+"
+```
+
+## Step 6 — Ask about instance lifecycle
+
+Ask the user:
+> "Experiment complete. Keep the instance running for debugging, or terminate?"
+
+If terminate:
+```bash
+cd ~/Desktop/shreshth_play
+bash ec2/stop.sh <INSTANCE_ID> ~/shreshth_play/<results_dir>
+```
+
+## Step 7 — Print summary
+
+```
+══════════════════════════════════════════════
+  Experiment: <experiment_name>
+  Status:     Complete
+  Instance:   <INSTANCE_ID> (<instance_type>)
+  W&B:        https://wandb.ai/<wandb_entity>/<wandb_project>
+  Results:    <project_dir>/results/<experiment_name>/
+  Stop:       bash ec2/stop.sh <INSTANCE_ID>
+══════════════════════════════════════════════
+```
+
+## Notes
+- The `ubuntu` username is correct for DLAMI Ubuntu 22.04 — do not use `ec2-user`
+- Spot instances can be interrupted with 2-min notice — remind user to checkpoint
+- If the user passes extra args that conflict with experiment.yaml values, the extra args take precedence
+- Always set WANDB_RUN_NAME so the run is easy to find in the dashboard

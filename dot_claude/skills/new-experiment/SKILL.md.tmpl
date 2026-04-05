@@ -1,0 +1,124 @@
+---
+name: new-experiment
+description: Launch a new EC2 GPU spot instance for an RL training experiment. Handles security groups, SSH config, code sync, and S3 results. Use when the user wants to start a new experiment, spin up an EC2 instance, or run GPU training.
+allowed-tools: Bash, Read, Write, Edit
+argument-hint: [experiment-name] [instance-type]
+---
+
+# New Experiment Launch Skill
+
+You are helping the user spin up a fresh EC2 GPU spot instance and start a new RL training experiment. Follow these steps in order. Be explicit about what you are doing at each step.
+
+## Configuration
+- **PEM file**: `{{ .chezmoi.homeDir }}/Desktop/Sujai.pem`
+- **Region**: `us-east-2`
+- **EC2 user**: `ubuntu` (DLAMI Ubuntu 22.04 uses `ubuntu`, not `ec2-user`)
+- **Default instance type**: `g4dn.xlarge` (cheapest GPU spot, ~$0.16/hr)
+- **S3 bucket**: `rl-experiments-sujai`
+- **Local code**: `~/Desktop/shreshth_play`
+- **Scripts**: `~/Desktop/shreshth_play/ec2/`
+
+## Arguments
+- `$ARGUMENTS[0]` — experiment name (e.g. `reward-accuracy-v2`). If not provided, prompt the user for one.
+- `$ARGUMENTS[1]` — instance type (optional, defaults to `g4dn.xlarge`)
+
+## Step 1 — Get experiment name
+If no experiment name was given in `$ARGUMENTS`, ask the user:
+> "What should I call this experiment? (used for tagging the instance and organizing S3 results)"
+
+Use a short, descriptive, hyphenated name like `reward-format-v1`.
+
+## Step 2 — Pre-flight checks
+Run these checks before launching:
+
+```bash
+# Check AWS credentials work
+aws sts get-caller-identity --query Account --output text
+
+# Check the security group exists (must exist from setup-aws.sh)
+aws ec2 describe-security-groups \
+  --filters "Name=group-name,Values=rl-training-sg" \
+  --query 'SecurityGroups[0].GroupId' \
+  --output text \
+  --region us-east-2
+```
+
+If the security group is missing or AWS credentials fail, tell the user to run:
+```bash
+./ec2/setup-aws.sh
+```
+and stop here.
+
+## Step 3 — Launch the instance
+Run the launch script with the experiment name and instance type:
+
+```bash
+cd ~/Desktop/shreshth_play
+bash ec2/launch.sh <INSTANCE_TYPE> <EXPERIMENT_NAME>
+```
+
+Capture the output. Extract and display:
+- **Instance ID** (e.g. `i-0abc123def456`)
+- **Public IP**
+- **SSH alias** (e.g. `ec2-reward-format-v1`)
+
+The script will wait until SSH is ready before returning. This takes 2-4 minutes — let the user know.
+
+## Step 4 — Sync local code to the instance
+Once the instance is up:
+
+```bash
+rsync -avz --exclude '__pycache__' --exclude '.git' --exclude 'results/' \
+  ~/Desktop/shreshth_play/ ubuntu@<PUBLIC_IP>:~/shreshth_play/
+```
+
+Report how many files were transferred.
+
+## Step 5 — Verify the instance is ready
+Run a quick sanity check:
+
+```bash
+ssh -i {{ .chezmoi.homeDir }}/Desktop/Sujai.pem ubuntu@<PUBLIC_IP> \
+  "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader && echo 'GPU OK'"
+```
+
+Show the GPU name and memory to confirm the instance is working.
+
+## Step 6 — Summarize and hand off
+Print a clean summary:
+
+```
+══════════════════════════════════════════════
+  Experiment: <EXPERIMENT_NAME>
+  Instance:   <INSTANCE_ID>  (<INSTANCE_TYPE>)
+  IP:         <PUBLIC_IP>
+  SSH:        ssh ec2-<EXPERIMENT_NAME>
+  Results:    s3://rl-experiments-sujai/experiments/<EXPERIMENT_NAME>/
+  Stop:       bash ec2/stop.sh <INSTANCE_ID> ~/shreshth_play/outputs
+══════════════════════════════════════════════
+```
+
+Then ask:
+> "Instance is ready. What do you want to run first?"
+
+## Stopping an experiment
+When the user says they are done or asks to stop/terminate, run:
+```bash
+cd ~/Desktop/shreshth_play
+bash ec2/stop.sh <INSTANCE_ID> ~/shreshth_play/outputs
+```
+
+This will push results to S3 first, then terminate the instance.
+
+## Pulling results locally
+To pull results from S3 after an experiment:
+```bash
+aws s3 sync s3://rl-experiments-sujai/experiments/<EXPERIMENT_NAME>/ \
+  ~/Desktop/shreshth_play/results/<EXPERIMENT_NAME>/
+```
+
+## Notes
+- The `ubuntu` username is correct for DLAMI Ubuntu 22.04 — do not use `ec2-user`
+- Spot instances can be interrupted by AWS with 2-min notice — checkpoint frequently
+- If the user's IP changes, the SSH security group rule will auto-update on next launch
+- Instance registry is at `~/Desktop/shreshth_play/ec2/.instances`

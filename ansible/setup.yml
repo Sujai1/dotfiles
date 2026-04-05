@@ -1,0 +1,114 @@
+---
+# Bootstrap a new Mac with all required software
+# Usage: ansible-playbook ~/.local/share/chezmoi/ansible/setup.yml --ask-become-pass
+#
+# This playbook is idempotent — safe to re-run.
+
+- name: Set up development environment
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  vars:
+    brew_formulae:
+      - fzf
+      - gh
+      - git
+      - neovim
+      - node
+      - sesh
+      - tmux
+      - vim
+      - zoxide
+    brew_casks:
+      - kitty
+      - aerospace
+    miniconda_url: "https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-arm64.sh"
+    miniconda_dest: "{{ ansible_env.HOME }}/miniconda3"
+
+  tasks:
+    # ── Homebrew ──
+    - name: Ensure Homebrew is installed
+      stat:
+        path: /opt/homebrew/bin/brew
+      register: brew_check
+
+    - name: Install Homebrew
+      shell: /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+      when: not brew_check.stat.exists
+
+    - name: Install brew formulae
+      community.general.homebrew:
+        name: "{{ brew_formulae }}"
+        state: present
+
+    - name: Install brew casks
+      community.general.homebrew_cask:
+        name: "{{ brew_casks }}"
+        state: present
+
+    # ── Miniconda ──
+    - name: Check if miniconda is installed
+      stat:
+        path: "{{ miniconda_dest }}/bin/conda"
+      register: conda_check
+
+    - name: Download miniconda installer
+      get_url:
+        url: "{{ miniconda_url }}"
+        dest: /tmp/miniconda.sh
+        mode: "0755"
+      when: not conda_check.stat.exists
+
+    - name: Install miniconda
+      shell: /tmp/miniconda.sh -b -p {{ miniconda_dest }}
+      when: not conda_check.stat.exists
+
+    - name: Initialize conda for zsh
+      shell: "{{ miniconda_dest }}/bin/conda init zsh"
+      when: not conda_check.stat.exists
+
+    - name: Clean up miniconda installer
+      file:
+        path: /tmp/miniconda.sh
+        state: absent
+
+    # ── Claude Code ──
+    - name: Check if Claude Code is installed
+      shell: which claude
+      register: claude_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Install Claude Code via npm
+      shell: npm install -g @anthropic-ai/claude-code
+      when: claude_check.rc != 0
+
+    # ── Create directories ──
+    - name: Ensure ~/.local/bin exists
+      file:
+        path: "{{ ansible_env.HOME }}/.local/bin"
+        state: directory
+        mode: "0755"
+
+    - name: Ensure ~/.claude/scripts exists
+      file:
+        path: "{{ ansible_env.HOME }}/.claude/scripts"
+        state: directory
+        mode: "0755"
+
+    - name: Ensure ~/.claude/skills exists
+      file:
+        path: "{{ ansible_env.HOME }}/.claude/skills"
+        state: directory
+        mode: "0755"
+
+    # ── Post-install reminders ──
+    - name: Remind about manual steps
+      debug:
+        msg: |
+          Setup complete! Manual steps remaining:
+          1. Run 'chezmoi apply' to install dotfiles
+          2. Create ~/.secrets with your API keys
+          3. Run 'gh auth login' to authenticate GitHub CLI
+          4. Open kitty and verify tmux auto-launches
