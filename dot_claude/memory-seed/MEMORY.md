@@ -1,0 +1,1 @@
+- [Absolute line numbers](feedback_line_numbers.md) — always use absolute, not relative, line numbers when showing files

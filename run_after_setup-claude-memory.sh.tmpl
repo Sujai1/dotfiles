@@ -1,0 +1,9 @@
+#!/bin/bash
+# Copy Claude memory seed files to the correct project-specific path
+MEMORY_DIR="{{ .chezmoi.homeDir }}/.claude/projects/-Users-{{ .chezmoi.username }}/memory"
+SEED_DIR="{{ .chezmoi.homeDir }}/.claude/memory-seed"
+
+if [ -d "$SEED_DIR" ] && [ ! -f "$MEMORY_DIR/MEMORY.md" ]; then
+    mkdir -p "$MEMORY_DIR"
+    cp "$SEED_DIR"/* "$MEMORY_DIR/"
+fi
