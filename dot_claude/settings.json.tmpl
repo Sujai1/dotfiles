@@ -1,6 +1,7 @@
 {
   "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "CLAUDE_CODE_EFFORT_LEVEL": "max"
   },
   "permissions": {
     "allow": [
@@ -46,12 +47,15 @@
             "if": "Bash(pip install*)",
             "statusMessage": "Updating package lock files",
             "async": true
+          },
+          {
+            "type": "command",
+            "command": "[ -n \"$TMUX_PANE\" ] && pwd > /tmp/claude-cwd-$(echo $TMUX_PANE | tr -d '%')"
           }
         ]
       }
     ]
   },
-  "effortLevel": "high",
   "voiceEnabled": true,
   "skipDangerousModePermissionPrompt": true
 }
