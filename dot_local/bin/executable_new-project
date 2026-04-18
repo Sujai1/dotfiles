@@ -1,0 +1,8 @@
+#!/bin/bash
+# Create a new project directory on Desktop and open it in a new tmux session
+# Setup (git, conda, .gitignore, etc.) is handled by /init-project inside Claude
+name="$1"
+dir="$HOME/Desktop/$name"
+mkdir -p "$dir"
+tmux new-session -d -s "$name" -c "$dir"
+tmux switch-client -t "$name"

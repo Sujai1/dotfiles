@@ -1,0 +1,15 @@
+#!/bin/bash
+# pane-cwd — Get the real working directory of a tmux pane.
+# For Claude Code panes, reads from /tmp/claude-cwd-<pane_num> (written by PostToolUse hook).
+# Falls back to tmux's pane_current_path.
+PANE_ID="$1"
+PANE_NUM=$(tmux display-message -t "$PANE_ID" -p '#{pane_id}' | tr -d '%')
+
+# Check if Claude Code has written its CWD
+CWD_FILE="/tmp/claude-cwd-${PANE_NUM}"
+if [ -f "$CWD_FILE" ]; then
+    cat "$CWD_FILE"
+else
+    # Fallback to tmux's pane path
+    tmux display-message -t "$PANE_ID" -p '#{pane_current_path}'
+fi
